@@ -10,6 +10,8 @@ import org.rag4j.integrations.ollama.OllamaEmbedder;
 import org.rag4j.rag.embedding.Embedder;
 import org.rag4j.rag.generation.AnswerGenerator;
 import org.rag4j.rag.generation.ObservedAnswerGenerator;
+import org.rag4j.rag.generation.QuestionGenerator;
+import org.rag4j.rag.generation.QuestionGeneratorService;
 import org.rag4j.rag.generation.chat.ChatService;
 import org.rag4j.rag.generation.quality.AnswerQuality;
 import org.rag4j.rag.generation.quality.AnswerQualityService;
@@ -18,6 +20,9 @@ import org.rag4j.rag.retrieval.ObservedRetriever;
 import org.rag4j.rag.retrieval.RetrievalOutput;
 import org.rag4j.rag.retrieval.RetrievalStrategy;
 import org.rag4j.rag.retrieval.Retriever;
+import org.rag4j.rag.retrieval.quality.QuestionAnswerRecord;
+import org.rag4j.rag.retrieval.quality.RetrievalQuality;
+import org.rag4j.rag.retrieval.quality.RetrievalQualityService;
 import org.rag4j.rag.retrieval.strategies.TopNRetrievalStrategy;
 import org.rag4j.rag.store.local.InternalContentStore;
 import org.rag4j.rag.tracker.LoggingRAGObserverPersistor;
@@ -27,6 +32,7 @@ import org.rag4j.rag.tracker.RAGTracker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.file.Path;
 import java.util.List;
 
 /**
@@ -60,6 +66,7 @@ public class AppRAG {
     private final InternalContentStore contentStore;
     private final ChatService chatService;
     private final RetrievalStrategy retrievalStrategy;
+    private final Embedder embedder;
 
     /**
      * Main method to run the application. Read the JavaDoc for the class to learn about the different options. You can
@@ -79,9 +86,11 @@ public class AppRAG {
         appRAG.answerQuestion("Who talked about RAG?", 2);
 
         // Verify quality of the answer
+
+        // Uncomment the next lines to generate a judgement list and determine the quality of the solution
+        appRAG.generateJudgementList("jfall_questions_answers_sample.csv");
         appRAG.answerQuestionObserved("What is RAG?", 2);
         appRAG.answerQuestionObserved("Who talked about RAG?", 2);
-
     }
 
     /**
@@ -91,7 +100,7 @@ public class AppRAG {
      */
     public AppRAG() {
         OllamaAccess ollamaAccess = new OllamaAccess();
-        Embedder embedder = new OllamaEmbedder(ollamaAccess);
+        this.embedder = new OllamaEmbedder(ollamaAccess);
         this.contentStore = new InternalContentStore(embedder);
         this.chatService = new OllamaChatService(ollamaAccess, "llama3.2");
         Retriever retriever = new ObservedRetriever(this.contentStore);
@@ -117,7 +126,7 @@ public class AppRAG {
     }
 
     /**
-     * Asks a question to the RAG. The question is used to retrieve relevant chunks from the content store. The maximum
+     * Asks a question to the LLM. The question is used to retrieve relevant chunks from the content store. The maximum
      * number of results is used to limit the number of results. The results are printed to the console.
      *
      * @param question Question to ask
@@ -146,6 +155,34 @@ public class AppRAG {
         AnswerGenerator answerGenerator = new AnswerGenerator(this.chatService);
         retrieveAnswer(answerGenerator, question, maxResults);
         logSeparator();
+    }
+
+    /**
+     * Generates a Judgment List. The Judgment List is used to determine the quality of the retrieval system. The
+     * generator is used to generate a question for each chunk in the content store. The question and answer pairs are
+     * saved to a file.
+     *
+     * @param fileName Name of the file to save the question and answer pairs
+     */
+    public void generateJudgementList(String fileName) {
+        QuestionGenerator questionGenerator = new QuestionGenerator(this.chatService);
+        QuestionGeneratorService questionGeneratorService =
+                new QuestionGeneratorService(this.contentStore, questionGenerator);
+        Path savedFilePath = questionGeneratorService.generateQuestionAnswerPairsAndSaveToTempFile(fileName);
+        LOGGER.info("Saved file: {}", savedFilePath);
+
+        ObservedRetriever observedRetriever = new ObservedRetriever(this.contentStore);
+        RetrievalQualityService retrievalQualityService = new RetrievalQualityService(observedRetriever);
+        List<QuestionAnswerRecord> questionAnswerRecords =
+                retrievalQualityService.readQuestionAnswersFromFilePath(savedFilePath, false);
+        RetrievalQuality retrievalQuality =
+                retrievalQualityService.obtainRetrievalQuality(questionAnswerRecords, this.embedder);
+
+        LOGGER.info("Correct: {}", retrievalQuality.getCorrect());
+        LOGGER.info("Incorrect: {}", retrievalQuality.getIncorrect());
+        LOGGER.info("Quality using precision: {}", retrievalQuality.getPrecision());
+        LOGGER.info("Total questions: {}", retrievalQuality.totalItems());
+        this.logSeparator();
     }
 
     /**
